@@ -8,21 +8,9 @@
     "cue-frontend": {
       "root": "frontend",
       "framework": "nextjs"
-    },
-    "cue-worker": {
-      "root": ".",
-      "framework": "fastapi",
-      "entrypoint": "worker/index.py",
-      "buildCommand": "pip install -r backend/requirements.txt"
     }
   },
   "rewrites": [
-    {
-      "source": "/cron/worker-tick",
-      "destination": {
-        "service": "cue-worker"
-      }
-    },
     {
       "source": "/api/(.*)",
       "destination": {
@@ -58,12 +46,6 @@
       "destination": {
         "service": "cue-frontend"
       }
-    }
-  ],
-  "crons": [
-    {
-      "path": "/cron/worker-tick",
-      "schedule": "*/10 * * * *"
     }
   ]
 }
