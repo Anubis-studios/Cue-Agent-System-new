@@ -43,12 +43,22 @@ services:
         sync: false
       - key: FIREWORKS_API_KEY
         sync: false
+      - key: CLOUDFLARE_API_TOKEN
+        sync: false
+      - key: CLOUDFLARE_ACCOUNT_ID
+        sync: false
+      - key: WANDB_API_KEY
+        sync: false
+      - key: OLLAMA_API_KEY
+        sync: false
+      - key: JOHNNYBOT_API_KEY
+        sync: false
       - key: MCP_SERVERS
         sync: false
       - key: SKILLS_DIR
         sync: false
       - key: LLM_FALLBACK_CHAIN
-        value: openrouter,groq,gemini,huggingface,cohere,mistral,github,together,fireworks,deepseek
+        value: openrouter,groq,gemini,huggingface,cohere,mistral,github,together,fireworks,cloudflare,wandb,deepseek,ollama,johnnybot
       - key: ALLOWED_ORIGINS
         sync: false
       - key: PYTHON_VERSION
