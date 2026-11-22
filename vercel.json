@@ -1,24 +1,69 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
-  "functions": {
-    "backend/api/index.py": { "memory": 1024, "maxDuration": 60 },
-    "worker/index.py": { "memory": 1024, "maxDuration": 300 }
+  "services": {
+    "backend": {
+      "root": "backend",
+      "framework": "fastapi"
+    },
+    "cue-frontend": {
+      "root": "frontend",
+      "framework": "nextjs"
+    },
+    "cue-worker": {
+      "root": ".",
+      "framework": "fastapi",
+      "entrypoint": "worker/index.py",
+      "buildCommand": "pip install -r backend/requirements.txt"
+    }
   },
-  "builds": [
-    { "src": "frontend/package.json", "use": "@vercel/next" },
-    { "src": "backend/api/index.py", "use": "@vercel/python@4.4.0" },
-    { "src": "worker/index.py", "use": "@vercel/python@4.4.0" }
-  ],
-  "routes": [
-    { "src": "/cron/worker-tick", "dest": "worker/index.py" },
-    { "src": "/api/(.*)", "dest": "backend/api/index.py" },
-    { "src": "/ws/(.*)", "dest": "backend/api/index.py" },
-    { "src": "/health", "dest": "backend/api/index.py" },
-    { "src": "/docs", "dest": "backend/api/index.py" },
-    { "src": "/openapi.json", "dest": "backend/api/index.py" },
-    { "src": "/(.*)", "dest": "frontend/$1" }
+  "rewrites": [
+    {
+      "source": "/cron/worker-tick",
+      "destination": {
+        "service": "cue-worker"
+      }
+    },
+    {
+      "source": "/api/(.*)",
+      "destination": {
+        "service": "backend"
+      }
+    },
+    {
+      "source": "/ws/(.*)",
+      "destination": {
+        "service": "backend"
+      }
+    },
+    {
+      "source": "/health",
+      "destination": {
+        "service": "backend"
+      }
+    },
+    {
+      "source": "/docs",
+      "destination": {
+        "service": "backend"
+      }
+    },
+    {
+      "source": "/openapi.json",
+      "destination": {
+        "service": "backend"
+      }
+    },
+    {
+      "source": "/(.*)",
+      "destination": {
+        "service": "cue-frontend"
+      }
+    }
   ],
   "crons": [
-    { "path": "/cron/worker-tick", "schedule": "*/10 * * * *" }
+    {
+      "path": "/cron/worker-tick",
+      "schedule": "*/10 * * * *"
+    }
   ]
 }
