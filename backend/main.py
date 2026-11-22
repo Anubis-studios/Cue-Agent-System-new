@@ -1,76 +1,137 @@
-import os, logging, re
-from fastapi import FastAPI, WebSocket, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from contextlib import asynccontextmanager
-from backend.llm_chain import generate
-from backend.tools import registry, execute_tool
-from backend.db.database import init_db, save_conversation
+"""FastAPI application for the Cue Agent System."""
 
-logging.basicConfig(level=logging.INFO)
+import logging
+import re
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
+
+from backend.config import ALLOWED_ORIGINS, DATABASE_PATH
+from backend.db.database import init_db, save_conversation
+from backend.llm_chain import LLMUnavailableError, generate
+from backend.tools import execute_tool, registry
+
 logger = logging.getLogger(__name__)
+
+APP_VERSION = "1.1.0"
+
+# Matches messages like "calculate 2+2" / "compute sqrt..." / "eval 3*4".
+_TOOL_TRIGGER = re.compile(r"(?:calculate|compute|eval)\s*(.+)", re.IGNORECASE)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    init_db(os.getenv("DATABASE_PATH", "cue.db"))
+    init_db(DATABASE_PATH)
     yield
 
-app = FastAPI(title="Cue Agent System", version="1.1.0", lifespan=lifespan)
-ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "http://localhost:3000").split(",")
-app.add_middleware(CORSMiddleware, allow_origins=ALLOWED_ORIGINS, allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+
+app = FastAPI(
+    title="Cue Agent System",
+    version=APP_VERSION,
+    lifespan=lifespan,
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=ALLOWED_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 
 class ChatRequest(BaseModel):
     message: str
     agent_id: str = "default"
     use_tools: bool = True
 
+
 class ToolRequest(BaseModel):
     tool_name: str
-    arguments: dict
+    arguments: dict = Field(default_factory=dict)
+
+
+def _run_tool_if_requested(message: str) -> str | None:
+    """Detect a calculation request and run the ``calculate`` tool."""
+    match = _TOOL_TRIGGER.search(message)
+    if not match:
+        return None
+    try:
+        result = execute_tool("calculate", {"expr": match.group(1).strip()})
+        return f"The result is {result}"
+    except Exception as exc:  # noqa: BLE001 - tool failure is non-fatal
+        logger.info("Tool execution failed: %s", exc)
+        return None
+
+
+async def _answer(message: str, use_tools: bool) -> tuple[str, str]:
+    prompt = message
+    if use_tools:
+        tool_result = _run_tool_if_requested(message)
+        if tool_result:
+            prompt = f"{message}\n\nTool result: {tool_result}"
+    return await generate(prompt)
+
 
 @app.get("/health")
-async def health(): return {"status": "ok", "version": "1.1.0"}
+async def health() -> dict:
+    return {"status": "ok", "version": APP_VERSION}
+
 
 @app.post("/api/chat/{agent_id}")
-async def chat(agent_id: str, req: ChatRequest):
+async def chat(agent_id: str, req: ChatRequest) -> dict:
     try:
-        if req.use_tools:
-            tool_result = await execute_tool_if_needed(req.message)
-            prompt = f"{req.message}\n\nTool result: {tool_result}" if tool_result else req.message
-        else:
-            prompt = req.message
-        
-        reply, provider = await generate(prompt)
-        try: save_conversation(agent_id, req.message, reply, provider)
-        except Exception as e: logger.warning(f"DB save failed: {e}")
-        
-        return {"agent_id": agent_id, "reply": reply, "provider": provider, "success": True}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        reply, provider = await _answer(req.message, req.use_tools)
+    except LLMUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001 - map unexpected errors to 500
+        logger.exception("Chat request failed")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    try:
+        save_conversation(agent_id, req.message, reply, provider)
+    except Exception as exc:  # noqa: BLE001 - persistence failure is non-fatal
+        logger.warning("DB save failed: %s", exc)
+
+    return {
+        "agent_id": agent_id,
+        "reply": reply,
+        "provider": provider,
+        "success": True,
+    }
+
 
 @app.get("/api/tools")
-async def list_tools():
-    return {"tools": {n: {"description": i["description"], "parameters": i["parameters"]} for n, i in registry.items()}}
+async def list_tools() -> dict:
+    tools = {
+        name: {"description": info["description"], "parameters": info["parameters"]}
+        for name, info in registry.items()
+    }
+    return {"tools": tools}
+
 
 @app.post("/api/tools/execute")
-async def exec_tool(req: ToolRequest):
-    try: return {"success": True, "result": execute_tool(req.tool_name, req.arguments)}
-    except Exception as e: raise HTTPException(status_code=400, detail=str(e))
+async def exec_tool(req: ToolRequest) -> dict:
+    try:
+        result = execute_tool(req.tool_name, req.arguments)
+    except Exception as exc:  # noqa: BLE001 - bad tool call from client
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"success": True, "result": result}
+
 
 @app.websocket("/ws/{agent_id}")
-async def ws_endpoint(websocket: WebSocket, agent_id: str):
+async def ws_endpoint(websocket: WebSocket, agent_id: str) -> None:
     await websocket.accept()
     try:
         while True:
             data = await websocket.receive_text()
             reply, provider = await generate(data)
-            await websocket.send_json({"agent_id": agent_id, "reply": reply, "provider": provider})
-    except: pass
-    finally: await websocket.close()
-
-async def execute_tool_if_needed(message: str) -> str | None:
-    match = re.search(r'(?:calculate|compute|eval)\s*(.+)', message, re.IGNORECASE)
-    if match:
-        try: return f"The result is {execute_tool('calculate', {'expr': match.group(1).strip()})}"
-        except: pass
-    return None
+            await websocket.send_json(
+                {"agent_id": agent_id, "reply": reply, "provider": provider}
+            )
+    except WebSocketDisconnect:
+        pass
+    finally:
+        await websocket.close()
