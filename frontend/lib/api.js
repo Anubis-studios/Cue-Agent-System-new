@@ -1,9 +1,7 @@
-const DEFAULT_API_BASE = "http://localhost:8000";
+// Browser clients use same-origin API routes. Vercel rewrites /api/* to the backend service.
+const DEFAULT_API_BASE = "";
 
-export const API_BASE =
-  process.env.NEXT_PUBLIC_API_URL ||
-  (process.env.BACKEND_HOST ? `https://${process.env.BACKEND_HOST}` : "") ||
-  DEFAULT_API_BASE;
+export const API_BASE = process.env.NEXT_PUBLIC_API_URL || DEFAULT_API_BASE;
 
 /**
  * Fetch with basic retry + linear backoff. Throws on the final failed attempt.
