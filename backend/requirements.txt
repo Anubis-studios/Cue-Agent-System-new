@@ -2,8 +2,12 @@ fastapi==0.115.6
 uvicorn[standard]==0.34.0
 aiohttp==3.11.11
 pydantic==2.10.4
-chromadb==0.5.23
-qrcode[pil]==8.0
 requests==2.32.3
 python-multipart==0.0.19
 websockets==14.1
+qrcode[pil]==8.0
+# Real database integrations: SQLAlchemy core + PostgreSQL driver (SQLite is stdlib)
+SQLAlchemy==2.0.36
+psycopg[binary]==3.2.3
+# Optional vector memories (semantic recall); guarded imports make it optional
+chromadb==0.5.23
