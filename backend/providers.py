@@ -259,44 +259,6 @@ PROVIDERS: dict[str, dict[str, Any]] = {
         "note": "Free credits on signup; serverless playground is free.",
         "models": FIREWORKS_MODELS,
     },
-    "cloudflare": {
-        # Workers AI REST API: OpenAI-compatible /v1/chat/completions path.
-        "kind": "openai",
-        "url": "https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/v1/chat/completions",
-        "key_env": "CLOUDFLARE_API_TOKEN",
-        "account_env": "CLOUDFLARE_ACCOUNT_ID",
-        "signup": "https://dash.cloudflare.com/?to=/:account/ai/workers-ai",
-        "note": "Workers AI free tier (10k neurons/day); needs account id + token.",
-        "models": CLOUDFLARE_MODELS,
-    },
-    "ollama": {
-        # Local/self-hosted Ollama server — completely free, no key required.
-        "kind": "openai",
-        "url": "http://localhost:11434/v1/chat/completions",
-        "key_env": "OLLAMA_API_KEY",  # optional; any value works locally
-        "no_key_required": True,
-        "signup": "https://ollama.com/download",
-        "note": "Local free models via Ollama (no cloud key needed).",
-        "models": OLLAMA_MODELS,
-    },
-    "wandb": {
-        "kind": "openai",
-        "url": "https://api.wandb.ai/llm/v1/chat/completions",
-        "key_env": "WANDB_API_KEY",
-        "signup": "https://wandb.ai/settings",
-        "note": "Weights & Biases inference free tier (gpt-oss etc.).",
-        "models": WANDB_MODELS,
-    },
-    "johnnybot": {
-        # Aggregator that proxies several frontier models with no key at all.
-        "kind": "openai",
-        "url": "https://api.johnnybot.com/api/join-chat",
-        "key_env": "JOHNNYBOT_API_KEY",
-        "no_key_required": True,
-        "signup": "https://johnnybot.com",
-        "note": "Zero-config free proxy tier (unreliable; last-resort fallback).",
-        "models": JOHNNYBOT_MODELS,
-    },
 }
 
 

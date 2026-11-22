@@ -48,19 +48,6 @@ def _require_api_key(env_name: str) -> str:
     return key
 
 
-def _resolve_url(cfg: dict) -> str:
-    """Resolve the endpoint URL, substituting ``{account_id}`` when required
-    (e.g. Cloudflare Workers AI)."""
-    url = cfg["url"]
-    if "{account_id}" in url:
-        account_env = cfg.get("account_env", "CLOUDFLARE_ACCOUNT_ID")
-        account_id = os.getenv(account_env)
-        if not account_id:
-            raise ProviderError(f"Account id missing ({account_env})")
-        url = url.replace("{account_id}", account_id)
-    return url
-
-
 async def _post_json(
     url: str,
     payload: dict,
@@ -106,10 +93,7 @@ class ModelEndpoint:
 
     async def complete(self, prompt: str) -> str:
         kind = self.cfg["kind"]
-        if self.cfg.get("no_key_required"):
-            api_key = os.getenv(self.cfg["key_env"], "not-needed")
-        else:
-            api_key = _require_api_key(self.cfg["key_env"])
+        api_key = _require_api_key(self.cfg["key_env"])
         messages = [{"role": "user", "content": prompt}]
 
         if kind == "openai":
@@ -119,7 +103,7 @@ class ModelEndpoint:
                 "temperature": LLM_TEMPERATURE,
             }
             data = await _post_json(
-                _resolve_url(self.cfg),
+                self.cfg["url"],
                 payload,
                 _bearer_headers(api_key, self.cfg.get("headers_extra")),
             )

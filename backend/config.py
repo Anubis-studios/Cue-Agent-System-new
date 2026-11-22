@@ -19,9 +19,7 @@ LLM_MAX_RETRIES: int = _int_env("LLM_MAX_RETRIES", 2)
 LLM_FALLBACK_CHAIN: list[str] = [
     p.strip()
     for p in os.getenv(
-        "LLM_FALLBACK_CHAIN",
-        "openrouter,groq,gemini,huggingface,cohere,mistral,github,"
-        "together,fireworks,cloudflare,wandb,deepseek,ollama,johnnybot",
+        "LLM_FALLBACK_CHAIN", "openrouter,groq,huggingface,gemini"
     ).split(",")
     if p.strip()
 ]
