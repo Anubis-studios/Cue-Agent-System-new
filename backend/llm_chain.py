@@ -1,15 +1,18 @@
 """Multi-provider LLM chain with retries, fallback, and response caching.
 
-Providers expose an async ``complete(prompt)`` method returning the generated
-text and raise :class:`ProviderError` on any failure (missing key, HTTP error,
-unexpected payload).  :func:`generate` walks the configured fallback chain,
-retrying each provider with exponential backoff.
+Every provider/model pair declared in :mod:`backend.providers` is tried in the
+configured fallback order; within a provider each free model is attempted
+before falling through to the next provider.  Providers expose an async
+``complete(prompt)`` method returning generated text and raise
+:class:`ProviderError` on any failure (missing key, HTTP error, unexpected
+payload).  :func:`generate` walks the chain and raises
+:class:`LLMUnavailableError` only when every option has failed.
 """
 
 import asyncio
 import logging
 import os
-from typing import Awaitable, Callable, Optional
+from typing import Any, Awaitable, Callable, Optional
 
 import aiohttp
 
@@ -21,6 +24,7 @@ from backend.config import (
     LLM_TEMPERATURE,
     LLM_TIMEOUT_SECONDS,
 )
+from backend.providers import PROVIDERS
 
 logger = logging.getLogger(__name__)
 
@@ -30,18 +34,17 @@ class ProviderError(RuntimeError):
 
 
 class LLMUnavailableError(RuntimeError):
-    """Raised when every provider in the fallback chain has failed."""
+    """Raised when every provider/model in the fallback chain has failed."""
 
     def __init__(self, errors: list[str]) -> None:
-        super().__init__("All providers failed: " + "; ".join(errors))
+        super().__init__("All providers failed: " + "; ".join(errors[:12]))
         self.errors = errors
 
 
-def _require_api_key(provider: str) -> str:
-    env_name = f"{provider.upper()}_API_KEY"
+def _require_api_key(env_name: str) -> str:
     key = os.getenv(env_name)
     if not key:
-        raise ProviderError(f"{provider} key missing ({env_name})")
+        raise ProviderError(f"API key missing ({env_name})")
     return key
 
 
@@ -49,7 +52,7 @@ async def _post_json(
     url: str,
     payload: dict,
     headers: Optional[dict] = None,
-) -> tuple[int, object]:
+) -> Any:
     timeout = aiohttp.ClientTimeout(total=LLM_TIMEOUT_SECONDS)
     async with aiohttp.ClientSession(timeout=timeout) as session:
         async with session.post(url, json=payload, headers=headers or {}) as resp:
@@ -57,92 +60,93 @@ async def _post_json(
             if resp.status != 200:
                 raise ProviderError(f"HTTP {resp.status}: {body[:200]}")
             try:
-                return resp.status, await resp.json()
+                return await resp.json()
             except Exception as exc:  # noqa: BLE001 - surface parse failures
                 raise ProviderError(f"Invalid JSON response: {exc}") from exc
 
 
-def _openai_style_headers(api_key: str) -> dict:
-    return {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+def _bearer_headers(api_key: str, extra: Optional[dict] = None) -> dict:
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    if extra:
+        headers.update(extra)
+    return headers
 
 
-def _extract_openai_content(data: object, provider: str) -> str:
+def _extract_openai_content(data: Any, provider: str) -> str:
     try:
-        return data["choices"][0]["message"]["content"]  # type: ignore[index]
+        return data["choices"][0]["message"]["content"]
     except (KeyError, IndexError, TypeError) as exc:
         raise ProviderError(f"Unexpected {provider} response shape") from exc
 
 
-class OpenAICompatibleProvider:
-    """Provider speaking the OpenAI chat-completions wire format."""
+class ModelEndpoint:
+    """A single (provider, model) callable endpoint."""
 
-    def __init__(self, name: str, url: str, model: str) -> None:
-        self.name = name
-        self.url = url
+    def __init__(self, provider: str, model: str, cfg: dict) -> None:
+        self.provider = provider
         self.model = model
+        self.cfg = cfg
+
+    @property
+    def label(self) -> str:
+        return f"{self.provider}/{self.model}"
 
     async def complete(self, prompt: str) -> str:
-        api_key = _require_api_key(self.name)
-        payload = {
-            "model": self.model,
-            "messages": [{"role": "user", "content": prompt}],
-            "temperature": LLM_TEMPERATURE,
-        }
-        _, data = await _post_json(self.url, payload, _openai_style_headers(api_key))
-        return _extract_openai_content(data, self.name)
+        kind = self.cfg["kind"]
+        api_key = _require_api_key(self.cfg["key_env"])
+        messages = [{"role": "user", "content": prompt}]
 
+        if kind == "openai":
+            payload = {
+                "model": self.model,
+                "messages": messages,
+                "temperature": LLM_TEMPERATURE,
+            }
+            data = await _post_json(
+                self.cfg["url"],
+                payload,
+                _bearer_headers(api_key, self.cfg.get("headers_extra")),
+            )
+            return _extract_openai_content(data, self.label)
 
-class HuggingFaceProvider:
-    name = "huggingface"
-    URL = "https://api-inference.huggingface.co/models/mistralai/Mistral-7B-Instruct-v0.3"
-
-    async def complete(self, prompt: str) -> str:
-        api_key = _require_api_key("HUGGINGFACE")
-        _, data = await _post_json(
-            self.URL, {"inputs": prompt}, _openai_style_headers(api_key)
-        )
-        if isinstance(data, list) and data:
+        if kind == "gemini":
+            url = f"{self.cfg['base_url']}/{self.model}:generateContent?key={api_key}"
+            payload = {
+                "contents": [{"parts": [{"text": prompt}]}],
+                "generationConfig": {"temperature": LLM_TEMPERATURE},
+            }
+            data = await _post_json(url, payload)
             try:
-                return data[0]["generated_text"]
-            except (KeyError, TypeError) as exc:
-                raise ProviderError("Unexpected HF response shape") from exc
-        raise ProviderError("Unexpected HF response")
+                return data["candidates"][0]["content"]["parts"][0]["text"]
+            except (KeyError, IndexError, TypeError) as exc:
+                raise ProviderError(f"Unexpected {self.label} response shape") from exc
+
+        if kind == "hf_inference":
+            url = f"{self.cfg['base_url']}/{self.model}"
+            data = await _post_json(url, {"inputs": prompt}, _bearer_headers(api_key))
+            if isinstance(data, list) and data:
+                try:
+                    return data[0]["generated_text"]
+                except (KeyError, TypeError) as exc:
+                    raise ProviderError(f"Unexpected {self.label} response shape") from exc
+            raise ProviderError(f"Unexpected {self.label} response")
+
+        raise ProviderError(f"Unknown wire protocol: {kind}")
 
 
-class GeminiProvider:
-    name = "gemini"
-    URL = (
-        "https://generativelanguage.googleapis.com"
-        "/v1beta/models/gemini-1.5-flash:generateContent"
-    )
-
-    async def complete(self, prompt: str) -> str:
-        api_key = _require_api_key("GEMINI")
-        payload = {
-            "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {"temperature": LLM_TEMPERATURE},
-        }
-        _, data = await _post_json(f"{self.URL}?key={api_key}", payload)
-        try:
-            return data["candidates"][0]["content"]["parts"][0]["text"]  # type: ignore[index]
-        except (KeyError, IndexError, TypeError) as exc:
-            raise ProviderError("Unexpected Gemini response shape") from exc
+def build_endpoints(chain: Optional[list[str]] = None) -> list[ModelEndpoint]:
+    """Flatten the fallback chain into ordered (provider, model) endpoints."""
+    endpoints: list[ModelEndpoint] = []
+    for name in chain or LLM_FALLBACK_CHAIN:
+        cfg = PROVIDERS.get(name)
+        if cfg is None:
+            logger.warning("Ignoring unknown provider in chain: %s", name)
+            continue
+        endpoints.extend(ModelEndpoint(name, model, cfg) for model in cfg["models"])
+    return endpoints
 
 
-PROVIDERS: dict[str, object] = {
-    "openrouter": OpenAICompatibleProvider(
-        "OPENROUTER",
-        "https://openrouter.ai/api/v1/chat/completions",
-        "meta-llama/llama-3.1-8b-instruct:free",
-    ),
-    "groq": OpenAICompatibleProvider(
-        "GROQ",
-        "https://api.groq.com/openai/v1/chat/completions",
-        "llama-3.1-8b-instant",
-    ),
-    "huggingface": HuggingFaceProvider(),
-    "gemini": GeminiProvider(),
-}
+ENDPOINTS: list[ModelEndpoint] = build_endpoints()
 
 _response_cache = TTLCache(CACHE_TTL_SECONDS)
 
@@ -164,30 +168,47 @@ async def _call_with_retry(
     raise last_error
 
 
-async def generate(prompt: str) -> tuple[str, str]:
-    """Generate a reply, returning ``(reply, provider_name)``.
+async def generate(prompt: str, provider_hint: Optional[str] = None) -> tuple[str, str]:
+    """Generate a reply, returning ``(reply, "provider/model")``.
 
-    Checks the TTL cache first, then tries each provider in the fallback
-    chain.  Raises :class:`LLMUnavailableError` if all providers fail.
+    Checks the TTL cache first, then tries every endpoint of every provider in
+    the fallback chain (optionally starting at ``provider_hint``).
+    Raises :class:`LLMUnavailableError` if all endpoints fail.
     """
-    cache_key = _response_cache.make_key(prompt)
+    cache_key = _response_cache.make_key(prompt + "|" + (provider_hint or ""))
     cached = _response_cache.get(cache_key)
     if cached is not None:
-        return cached, "cache"
+        return cached[0], cached[1]
+
+    endpoints = ENDPOINTS
+    if provider_hint:
+        hinted = [e for e in endpoints if e.provider == provider_hint]
+        others = [e for e in endpoints if e.provider != provider_hint]
+        endpoints = hinted + others
 
     errors: list[str] = []
-    for name in LLM_FALLBACK_CHAIN:
-        provider = PROVIDERS.get(name)
-        if provider is None:
-            errors.append(f"{name}: unknown provider")
-            continue
+    for endpoint in endpoints:
         try:
-            reply = await _call_with_retry(provider.complete, prompt)  # type: ignore[attr-defined]
+            reply = await _call_with_retry(endpoint.complete, prompt)
         except Exception as exc:  # noqa: BLE001 - collect and fall through
-            logger.warning("Provider %s failed: %s", name, exc)
-            errors.append(f"{name}: {exc}")
+            logger.warning("Endpoint %s failed: %s", endpoint.label, exc)
+            errors.append(f"{endpoint.label}: {exc}")
             continue
-        _response_cache.set(cache_key, reply)
-        return reply, name
+        _response_cache.set(cache_key, (reply, endpoint.label))
+        return reply, endpoint.label
 
     raise LLMUnavailableError(errors)
+
+
+def catalog() -> dict:
+    """Public catalog of providers/models for API consumers and the UI."""
+    return {
+        provider: {
+            "kind": cfg["kind"],
+            "models": cfg["models"],
+            "signup": cfg["signup"],
+            "note": cfg["note"],
+            "key_configured": bool(os.getenv(cfg["key_env"])),
+        }
+        for provider, cfg in PROVIDERS.items()
+    }

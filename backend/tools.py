@@ -1,6 +1,14 @@
-"""Tool registry with a safe AST-based calculator."""
+"""Unified tool/skill/MCP registry with a safe AST-based calculator.
+
+Every capability the agent can use — built-in tools, skills from the
+agentic-skills library, and tools discovered from MCP servers — lives in this
+single ``registry`` so the rest of the app has one place to list and execute
+usable functions.
+"""
 
 import ast
+import asyncio
+import inspect
 import operator
 from typing import Any, Callable, Optional
 
@@ -8,25 +16,71 @@ registry: dict[str, dict] = {}
 
 
 def register_tool(
-    name: str, description: str = "", parameters: Optional[dict] = None
+    name: str,
+    description: str = "",
+    parameters: Optional[dict] = None,
+    source: str = "builtin",
 ) -> Callable:
-    """Decorator that registers a function as an executable tool."""
+    """Decorator that registers a function as an executable tool/skill."""
 
     def decorator(fn: Callable) -> Callable:
         registry[name] = {
             "fn": fn,
             "description": description,
             "parameters": parameters or {},
+            "source": source,  # builtin | skill | mcp
         }
         return fn
 
     return decorator
 
 
+def register_external_tool(
+    name: str,
+    description: str,
+    parameters: dict,
+    fn: Callable[..., Any],
+    source: str = "mcp",
+    coroutine: bool = False,
+) -> None:
+    """Register a runtime-discovered tool (e.g. proxied from an MCP server)."""
+    registry[name] = {
+        "fn": fn,
+        "description": description,
+        "parameters": parameters,
+        "source": source,
+        "coroutine": coroutine,
+    }
+
+
 def execute_tool(tool_name: str, arguments: dict) -> Any:
     if tool_name not in registry:
         raise ValueError(f"Unknown tool: {tool_name}")
-    return registry[tool_name]["fn"](**arguments)
+    entry = registry[tool_name]
+    result = entry["fn"](**arguments)
+    if inspect.isawaitable(result):
+        # Sync context (worker/CLI): drive the coroutine to completion.
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if loop is not None:
+            raise RuntimeError(
+                f"Tool '{tool_name}' is async; use execute_tool_async inside a loop"
+            )
+        result = asyncio.run(result)
+    return result
+
+
+async def execute_tool_async(tool_name: str, arguments: dict) -> Any:
+    """Execute a tool from async code; awaits coroutine tools directly."""
+    if tool_name not in registry:
+        raise ValueError(f"Unknown tool: {tool_name}")
+    entry = registry[tool_name]
+    result = entry["fn"](**arguments)
+    if inspect.isawaitable(result):
+        result = await result
+    return result
 
 
 _ALLOWED_OPERATORS = {

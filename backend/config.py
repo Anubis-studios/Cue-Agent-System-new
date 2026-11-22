@@ -37,3 +37,13 @@ ALLOWED_ORIGINS: list[str] = [
 
 # Workers
 WORKER_POLL_INTERVAL_SECONDS: int = _int_env("WORKER_POLL_INTERVAL", 10)
+
+# Vector memories (optional ChromaDB semantic recall)
+VECTOR_MEMORY_ENABLED: bool = os.getenv("VECTOR_MEMORY", "0") == "1"
+CHROMA_DIR: str = os.getenv("CHROMA_DIR", ".chroma")
+
+# Agent skills
+SKILLS_DIR: str = os.getenv("SKILLS_DIR", "")  # optional user skill directory
+
+# MCP servers (JSON: {"name": {"command": "..."} or {"url": "..."}})
+MCP_SERVERS_RAW: str = os.getenv("MCP_SERVERS", "")
